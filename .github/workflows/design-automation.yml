@@ -1,22 +1,42 @@
+name: AI Design Automation
+
+on:
+  workflow_dispatch:
+  pull_request:
+
 jobs:
   design-loop:
     runs-on: self-hosted
     outputs:
       verdict: ${{ steps.result.outputs.verdict }}
     steps:
+      - uses: actions/checkout@v3
+
       - name: Design Auto Loop (Max 3)
         id: result
         run: |
-          for i in 1 2 3; do
-            bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" > design/DETAIL.md
-            RESULT=$(bin/llm_run opencode "design/DETAIL.md を厳格にレビューし、Pass/FailをJSONで返せ")
-            VERDICT=$(echo $RESULT | jq -r .verdict)
+          mkdir -p design
+          ITERATION=$(jq -r '.iteration' .ai/state.json)
+          ITERATION=$((ITERATION+1))
 
-            if [ "$VERDICT" = "pass" ]; then
-              echo "verdict=pass" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          done
+          if [ $ITERATION -gt 3 ]; then
+            echo "verdict=fail" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          jq ".iteration=$ITERATION" .ai/state.json > tmp.json && mv tmp.json .ai/state.json
+
+          # Gemini生成
+          bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" --output-format json > design/DETAIL.json
+
+          # OpenCodeレビュー
+          RESULT=$(bin/llm_run opencode "design/DETAIL.json をレビューしてPass/FailをJSONで返せ")
+          VERDICT=$(echo $RESULT | jq -r .verdict)
+
+          if [ "$VERDICT" = "pass" ]; then
+            echo "verdict=pass" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           echo "verdict=fail" >> $GITHUB_OUTPUT
           exit 1
@@ -35,5 +55,4 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Implement
-        run: bin/llm_run gemini "DETAIL.mdを実装せよ"
-
+        run: bin/llm_run gemini "design/DETAIL.json を実装せよ"
