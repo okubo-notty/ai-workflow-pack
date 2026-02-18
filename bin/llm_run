@@ -1,4 +1,11 @@
 #!/bin/bash
-# Linux前提: Bashスクリプト
-echo "LLM Adapter ここにGemini CLI呼び出しを実装"
+# 実行例: bin/llm_run gemini "プロンプト内容"
+TOOL=$1
+PROMPT=$2
+
+if [ "$TOOL" == "gemini" ]; then
+  gemini -p "$PROMPT" --output-format json
+elif [ "$TOOL" == "opencode" ]; then
+  opencode -m opus-4.5 -p "$PROMPT" --format json
+fi
 

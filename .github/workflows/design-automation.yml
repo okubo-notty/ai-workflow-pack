@@ -1,14 +1,39 @@
-name: AI Design Automation
-on:
-  push:
-    branches:
-      - main
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  design-loop:
+    runs-on: self-hosted
+    outputs:
+      verdict: ${{ steps.result.outputs.verdict }}
     steps:
-      - uses: actions/checkout@v3
-      - name: Placeholder step
-        run: echo "ここにGemini CLIとOpenCode/Opus 4.5連携処理を追加"
+      - name: Design Auto Loop (Max 3)
+        id: result
+        run: |
+          for i in 1 2 3; do
+            bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" > design/DETAIL.md
+            RESULT=$(bin/llm_run opencode "design/DETAIL.md を厳格にレビューし、Pass/FailをJSONで返せ")
+            VERDICT=$(echo $RESULT | jq -r .verdict)
 
+            if [ "$VERDICT" = "pass" ]; then
+              echo "verdict=pass" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          done
+
+          echo "verdict=fail" >> $GITHUB_OUTPUT
+          exit 1
+
+  human-approval:
+    needs: design-loop
+    if: needs.design-loop.outputs.verdict == 'pass'
+    runs-on: ubuntu-latest
+    environment: production-approval
+    steps:
+      - name: Notify Approval
+        run: echo "AIレビュー通過。内容を確認して承認してください。"
+
+  implement:
+    needs: human-approval
+    runs-on: self-hosted
+    steps:
+      - name: Implement
+        run: bin/llm_run gemini "DETAIL.mdを実装せよ"
 
