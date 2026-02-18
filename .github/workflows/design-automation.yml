@@ -1,0 +1,14 @@
+name: AI Design Automation
+on:
+  push:
+    branches:
+      - main
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Placeholder step
+        run: echo "ここにGemini CLIとOpenCode/Opus 4.5連携処理を追加"
+
+

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Linux前提: Bashスクリプト
+echo "LLM Adapter ここにGemini CLI呼び出しを実装"
+
