@@ -38,7 +38,7 @@ jobs:
 
             # セルフレビュー
             RESULT=$(bin/llm_run gemini "以下をレビューしてPass/FailをJSONで返せ:
-              $(cat design/DETAIL.md)
+              $(cat design/DETAIL.json)
               $(cat requirements/Acceptance.feature)" --output-format json)
             VERDICT=$(echo $RESULT | jq -r .verdict)
 
