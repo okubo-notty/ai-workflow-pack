@@ -2,6 +2,10 @@ name: AI Full Design Automation
 
 on:
   workflow_dispatch: {}
+
+permissions:
+  contents: write  # ← ここで GitHub Actions が push 可能に
+
 jobs:
   design-loop:
     runs-on: self-hosted
