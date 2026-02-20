@@ -22,7 +22,7 @@ jobs:
           ITERATION=$((ITERATION+1))
           echo "{\"iteration\": $ITERATION}" > .ai/state.json
 
-          MAX_RETRIES=3
+          MAX_RETRIES=1
           RETRY=0
           VERDICT="fail"
 
