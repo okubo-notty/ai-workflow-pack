@@ -1,58 +1,146 @@
-name: AI Design Automation
+name: AI Full Design Automation
 
 on:
-  workflow_dispatch:
-  pull_request:
-
+  workflow_dispatch: {}
 jobs:
   design-loop:
     runs-on: self-hosted
     outputs:
       verdict: ${{ steps.result.outputs.verdict }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Design Auto Loop (Max 3)
+      - name: Design + Acceptance Generation & Self-Review
         id: result
         run: |
-          mkdir -p design
-          ITERATION=$(jq -r '.iteration' .ai/state.json)
+          mkdir -p design requirements .ai
+
+          # state.json読み込み（初回は0）
+          ITERATION=$(jq -r '.iteration // 0' .ai/state.json 2>/dev/null || echo 0)
           ITERATION=$((ITERATION+1))
+          echo "{\"iteration\": $ITERATION}" > .ai/state.json
 
-          if [ $ITERATION -gt 3 ]; then
-            echo "verdict=fail" >> $GITHUB_OUTPUT
-            exit 1
-          fi
+          MAX_RETRIES=3
+          RETRY=0
+          VERDICT="fail"
 
-          jq ".iteration=$ITERATION" .ai/state.json > tmp.json && mv tmp.json .ai/state.json
+          while [ "$VERDICT" != "pass" ] && [ $RETRY -lt $MAX_RETRIES ]; do
+            echo "Iteration $ITERATION / Retry $RETRY"
 
-          # Gemini生成
-          bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" --output-format json > design/DETAIL.json
+            # Geminiで設計書生成
+            bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" --output-format json > design/DETAIL.json
 
-          # OpenCodeレビュー
-          RESULT=$(bin/llm_run opencode "design/DETAIL.json をレビューしてPass/FailをJSONで返せ")
-          VERDICT=$(echo $RESULT | jq -r .verdict)
+            DESIGN_JSON=$(cat design/DETAIL.json)
+            # Gherkin受け入れ基準生成
+            bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ: $DESIGN_JSON" --output-format json > requirements/Acceptance.feature
 
-          if [ "$VERDICT" = "pass" ]; then
-            echo "verdict=pass" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+            # セルフレビュー
+            RESULT=$(bin/llm_run gemini "以下をレビューしてPass/FailをJSONで返せ:
+              $(cat design/DETAIL.md)
+              $(cat requirements/Acceptance.feature)" --output-format json)
+            VERDICT=$(echo $RESULT | jq -r .verdict)
 
-          echo "verdict=fail" >> $GITHUB_OUTPUT
-          exit 1
+            echo "VERDICT=$VERDICT"
+
+            if [ "$VERDICT" != "pass" ]; then
+              echo "Self-review failed, rewriting..."
+            fi
+
+            RETRY=$((RETRY+1))
+          done
+
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+
+          [ "$VERDICT" = "pass" ] || exit 1
+
+      - name: Commit AI state.json
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .ai/state.json
+          git commit -m "Update AI iteration to $ITERATION" || echo "No changes to commit"
+          git push
+
+      - name: Upload Design & Requirements
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-design-spec
+          path: |
+            design/DETAIL.md
+            requirements/Acceptance.feature
+
+  review-loop:
+    needs: design-loop
+    runs-on: self-hosted
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Design & Requirements
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-design-spec
+          path: .
+
+      - name: Review & Feedback Loop
+        id: review
+        run: |
+          MAX_RETRIES=3
+          RETRY=0
+          VERDICT="fail"
+
+          while [ "$VERDICT" != "pass" ] && [ $RETRY -lt $MAX_RETRIES ]; do
+            echo "Review Retry $RETRY"
+
+            # OpenCodeレビュー
+            RESULT=$(bin/llm_run opencode "design/DETAIL.md + requirements/Acceptance.feature をレビューしてPass/Failを返せ" --output-format json)
+
+            # Adapter独立レビュー
+            ADAPTER_RESULT=$(bin/adapter review design/DETAIL.md requirements/Acceptance.feature --json)
+
+            OPEN_VERDICT=$(jq -r '.verdict' <<< "$RESULT")
+            ADAPTER_VERDICT=$(jq -r '.verdict' <<< "$ADAPTER_RESULT")
+
+            if [ "$OPEN_VERDICT" != "pass" ] || [ "$ADAPTER_VERDICT" != "pass" ]; then
+              # Geminiで差戻しリライト
+              DESIGN_JSON=$(cat design/DETAIL.json)
+              bin/llm_run gemini "レビューでFailだった箇所を修正せよ: $DESIGN_JSON" --output-format json > design/DETAIL.json
+              # 受け入れ基準を再生成
+              DESIGN_JSON=$(cat design/DETAIL.json)
+              bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ:$DESIGN_JSON" --output-format json > requirements/Acceptance.feature
+            fi
+
+            RETRY=$((RETRY+1))
+          done
+
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+
+          [ "$VERDICT" = "pass" ] || exit 1
+
+      - name: Upload Final Design
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-ai-design
+          path: |
+            design/DETAIL.json
+            requirements/Acceptance.feature
 
   human-approval:
-    needs: design-loop
-    if: needs.design-loop.outputs.verdict == 'pass'
-    runs-on: ubuntu-latest
+    needs: review-loop
+    if: needs.review-loop.outputs.verdict == 'pass'
+    runs-on: self-hosted
     environment: production-approval
     steps:
-      - name: Notify Approval
-        run: echo "AIレビュー通過。内容を確認して承認してください。"
+      - name: Human Approval (Antigravity)
+        run: |
+          # 差分確認
+          antigravity diff design/ requirements/
+          echo "承認チェックリストに従い PR Approve または Actions Environment Approval を実施"
 
-  implement:
-    needs: human-approval
-    runs-on: self-hosted
-    steps:
-      - name: Implement
-        run: bin/llm_run gemini "design/DETAIL.json を実装せよ"
+
