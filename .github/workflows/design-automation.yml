@@ -30,11 +30,11 @@ jobs:
             echo "Iteration $ITERATION / Retry $RETRY"
 
             # Geminiで設計書生成
-            bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" --output-format json > design/DETAIL.json
+            bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" --model gemini-2.5-flash --output-format json > design/DETAIL.json
 
             DESIGN_JSON=$(cat design/DETAIL.json)
             # Gherkin受け入れ基準生成
-            bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ: $DESIGN_JSON" --output-format json > requirements/Acceptance.feature
+            bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ: $DESIGN_JSON" --model gemini-2.5-flash --output-format json > requirements/Acceptance.feature
 
             # セルフレビュー
             RESULT=$(bin/llm_run gemini "以下をレビューしてPass/FailをJSONで返せ:
@@ -110,10 +110,10 @@ jobs:
             if [ "$OPEN_VERDICT" != "pass" ] || [ "$ADAPTER_VERDICT" != "pass" ]; then
               # Geminiで差戻しリライト
               DESIGN_JSON=$(cat design/DETAIL.json)
-              bin/llm_run gemini "レビューでFailだった箇所を修正せよ: $DESIGN_JSON" --output-format json > design/DETAIL.json
+              bin/llm_run gemini "レビューでFailだった箇所を修正せよ: $DESIGN_JSON" --model gemini-2.5-flash --output-format json > design/DETAIL.json
               # 受け入れ基準を再生成
               DESIGN_JSON=$(cat design/DETAIL.json)
-              bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ:$DESIGN_JSON" --output-format json > requirements/Acceptance.feature
+              bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ:$DESIGN_JSON" --model gemini-2.5-flash --output-format json > requirements/Acceptance.feature
             fi
 
             RETRY=$((RETRY+1))
