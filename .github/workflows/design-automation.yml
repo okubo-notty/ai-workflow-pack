@@ -34,19 +34,19 @@ jobs:
 
           echo "Generating design..."
           DESIGN_JSON=$(bin/llm_run gemini \
-            "詳細設計書をJSON形式で生成せよ。" \
-            --model gemini-2.5-flash \
-            --output-format json \
-            --no-tools)
+            -p "詳細設計書をJSON形式で生成せよ。" \
+            -m gemini-2.5-flash \
+            --approval-mode plan \
+            -o json)
 
           echo "$DESIGN_JSON" | jq . > design/DETAIL.json
 
           echo "Generating acceptance criteria..."
           ACCEPTANCE=$(bin/llm_run gemini \
             "以下の設計からGherkin受入基準を生成せよ: $DESIGN_JSON" \
-            --model gemini-2.5-flash \
-            --output-format json \
-            --no-tools)
+            -m gemini-2.5-flash \
+            --approval-mode plan \
+            -o json)
 
           echo "$ACCEPTANCE" > requirements/Acceptance.feature
 

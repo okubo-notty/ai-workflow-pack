@@ -3,7 +3,7 @@ TOOL=$1
 shift
 
 if [ "$TOOL" == "gemini" ]; then
-  gemini "$@" --no-tools
+  gemini "$@"
 elif [ "$TOOL" == "opencode" ]; then
   opencode -m opus-4.5 "$@" --format json
 fi
