@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
 
       # 1) LLM によるコード実装
-      - name: Generate Implementation by OpenCode (Gemini 3 Pro)
+      - name: Generate Implementation by OpenCode 
         id: impl
         run: |
           mkdir -p .ai impl

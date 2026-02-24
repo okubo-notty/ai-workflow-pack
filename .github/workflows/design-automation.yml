@@ -1,4 +1,4 @@
-name: AI Full Design Automation (Free Stable)
+name: AI Full Design Automation
 
 on:
   workflow_dispatch:
@@ -20,44 +20,56 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate Design + Acceptance + Self Review (Single Call)
+      - name: Generate Design + Acceptance + Self Review
         id: generate
         run: |
           mkdir -p design requirements .ai
 
+          # iteration管理
           ITERATION=$(jq -r '.iteration // 0' .ai/state.json 2>/dev/null || echo 0)
           ITERATION=$((ITERATION+1))
           echo "{\"iteration\": $ITERATION}" > .ai/state.json
 
-          echo "Sleeping to avoid rate spike..."
-          sleep 10
+          echo "Sleeping 5s to avoid rate spike..."
+          sleep 5
 
+          # Gemini呼び出し（無料枠用・ツール無効）
           RESULT=$(bin/llm_run gemini "
           以下を順番に実行せよ。
-
           1. 詳細設計書をJSON形式で生成
           2. その設計からGherkin受入基準を生成
           3. 自己レビューを行い Pass/Fail を判定
-
           出力は必ず以下JSON形式:
           {
             \"design\": {...},
             \"acceptance\": \"...\",
             \"verdict\": \"pass\" or \"fail\"
           }
-          " --model gemini-2.5-flash --output-format json)
+          " --model gemini-2.5-flash --output-format json --no-tools)
 
           echo "$RESULT" > full_result.json
 
+          # JSON分割
           VERDICT=$(echo "$RESULT" | jq -r '.verdict')
-
           echo "$RESULT" | jq '.design' > design/DETAIL.json
           echo "$RESULT" | jq -r '.acceptance' > requirements/Acceptance.feature
 
-          echo "VERDICT=$VERDICT"
+          echo "Self-review VERDICT=$VERDICT"
 
-          if [ "$VERDICT" != "pass" ]; then
-            echo "Self-review failed"
+          # OpenCodeレビュー
+          echo "Running OpenCode review..."
+          OPEN_RESULT=$(bin/llm_run opencode "design/DETAIL.json + requirements/Acceptance.feature をレビューして Pass/Fail を JSON で返せ")
+          OPEN_VERDICT=$(echo "$OPEN_RESULT" | jq -r '.verdict')
+          echo "OpenCode VERDICT=$OPEN_VERDICT"
+
+          # Adapterレビュー（任意）
+          ADAPTER_RESULT=$(bin/adapter review design/DETAIL.json requirements/Acceptance.feature --json)
+          ADAPTER_VERDICT=$(echo "$ADAPTER_RESULT" | jq -r '.verdict')
+          echo "Adapter VERDICT=$ADAPTER_VERDICT"
+
+          # どれか FAIL ならワークフロー停止
+          if [ "$VERDICT" != "pass" ] || [ "$OPEN_VERDICT" != "pass" ] || [ "$ADAPTER_VERDICT" != "pass" ]; then
+            echo "Review failed, stopping workflow..."
             exit 1
           fi
 

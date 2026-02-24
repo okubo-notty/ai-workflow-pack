@@ -1,11 +1,25 @@
 #!/bin/bash
 # 実行例: bin/llm_run gemini "プロンプト内容"
+
 TOOL=$1
 PROMPT=$2
 
 if [ "$TOOL" == "gemini" ]; then
-  gemini -p "$PROMPT" --output-format json
-elif [ "$TOOL" == "opencode" ]; then
-  opencode -m opus-4.5 -p "$PROMPT" --format json
-fi
 
+  # GitHub Secrets の GEMINI_API_KEY を利用
+  curl -s -X POST \
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"contents\": [{
+        \"parts\": [{
+          \"text\": \"$PROMPT\"
+        }]
+      }]
+    }" | jq -r '.candidates[0].content.parts[0].text'
+
+elif [ "$TOOL" == "opencode" ]; then
+
+  opencode -m opus-4.5 -p "$PROMPT" --format json
+
+fi
