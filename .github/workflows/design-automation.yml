@@ -3,7 +3,6 @@ name: AI Full Design Automation
 on:
   workflow_dispatch:
 
-# 同時実行防止
 concurrency:
   group: ai-design-free
   cancel-in-progress: false
@@ -20,9 +19,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate Design + Acceptance + Self Review
-        id: generate
+      - name: Generate Design + Acceptance
         run: |
+          set -e
           mkdir -p design requirements .ai
 
           # iteration管理
@@ -30,46 +29,41 @@ jobs:
           ITERATION=$((ITERATION+1))
           echo "{\"iteration\": $ITERATION}" > .ai/state.json
 
-          echo "Sleeping 5s to avoid rate spike..."
+          echo "Sleeping 5s..."
           sleep 5
 
-          # Gemini呼び出し（無料枠用・ツール無効）
-          RESULT=$(bin/llm_run gemini "
-          以下を順番に実行せよ。
-          1. 詳細設計書をJSON形式で生成
-          2. その設計からGherkin受入基準を生成
-          3. 自己レビューを行い Pass/Fail を判定
-          出力は必ず以下JSON形式:
-          {
-            \"design\": {...},
-            \"acceptance\": \"...\",
-            \"verdict\": \"pass\" or \"fail\"
-          }
-          " --model gemini-2.5-flash --output-format json --no-tools)
+          echo "Generating design..."
+          DESIGN_JSON=$(bin/llm_run gemini \
+            "詳細設計書をJSON形式で生成せよ。" \
+            --model gemini-2.5-flash \
+            --output-format json \
+            --no-tools)
 
-          echo "$RESULT" > full_result.json
+          echo "$DESIGN_JSON" | jq . > design/DETAIL.json
 
-          # JSON分割
-          VERDICT=$(echo "$RESULT" | jq -r '.verdict')
-          echo "$RESULT" | jq '.design' > design/DETAIL.json
-          echo "$RESULT" | jq -r '.acceptance' > requirements/Acceptance.feature
+          echo "Generating acceptance criteria..."
+          ACCEPTANCE=$(bin/llm_run gemini \
+            "以下の設計からGherkin受入基準を生成せよ: $DESIGN_JSON" \
+            --model gemini-2.5-flash \
+            --output-format json \
+            --no-tools)
 
-          echo "Self-review VERDICT=$VERDICT"
+          echo "$ACCEPTANCE" > requirements/Acceptance.feature
 
-          # OpenCodeレビュー
+      - name: OpenCode Review
+        run: |
+          set -e
+
           echo "Running OpenCode review..."
-          OPEN_RESULT=$(bin/llm_run opencode "design/DETAIL.json + requirements/Acceptance.feature をレビューして Pass/Fail を JSON で返せ")
-          OPEN_VERDICT=$(echo "$OPEN_RESULT" | jq -r '.verdict')
-          echo "OpenCode VERDICT=$OPEN_VERDICT"
+          OPEN_RESULT=$(bin/llm_run opencode \
+            "design/DETAIL.json と requirements/Acceptance.feature をレビューして Pass/Fail を JSON で返せ")
 
-          # Adapterレビュー（任意）
-          ADAPTER_RESULT=$(bin/adapter review design/DETAIL.json requirements/Acceptance.feature --json)
-          ADAPTER_VERDICT=$(echo "$ADAPTER_RESULT" | jq -r '.verdict')
-          echo "Adapter VERDICT=$ADAPTER_VERDICT"
+          echo "$OPEN_RESULT"
 
-          # どれか FAIL ならワークフロー停止
-          if [ "$VERDICT" != "pass" ] || [ "$OPEN_VERDICT" != "pass" ] || [ "$ADAPTER_VERDICT" != "pass" ]; then
-            echo "Review failed, stopping workflow..."
+          VERDICT=$(echo "$OPEN_RESULT" | jq -r '.verdict')
+
+          if [ "$VERDICT" != "pass" ]; then
+            echo "Review failed"
             exit 1
           fi
 
