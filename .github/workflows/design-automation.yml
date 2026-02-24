@@ -1,63 +1,65 @@
-name: AI Full Design Automation
+name: AI Full Design Automation (Free Stable)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+
+# 同時実行防止
+concurrency:
+  group: ai-design-free
+  cancel-in-progress: false
 
 permissions:
-  contents: write  # ← ここで GitHub Actions が push 可能に
+  contents: write
 
 jobs:
-  design-loop:
+  design-and-review:
     runs-on: self-hosted
-    outputs:
-      verdict: ${{ steps.result.outputs.verdict }}
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Design + Acceptance Generation & Self-Review
-        id: result
+      - name: Generate Design + Acceptance + Self Review (Single Call)
+        id: generate
         run: |
           mkdir -p design requirements .ai
 
-          # state.json読み込み（初回は0）
           ITERATION=$(jq -r '.iteration // 0' .ai/state.json 2>/dev/null || echo 0)
           ITERATION=$((ITERATION+1))
           echo "{\"iteration\": $ITERATION}" > .ai/state.json
 
-          MAX_RETRIES=1
-          RETRY=0
-          VERDICT="fail"
+          echo "Sleeping to avoid rate spike..."
+          sleep 10
 
-          while [ "$VERDICT" != "pass" ] && [ $RETRY -lt $MAX_RETRIES ]; do
-            echo "Iteration $ITERATION / Retry $RETRY"
+          RESULT=$(bin/llm_run gemini "
+          以下を順番に実行せよ。
 
-            # Geminiで設計書生成
-            bin/llm_run gemini "$(cat .github/prompts/design_gen.txt)" --model gemini-2.5-flash --output-format json > design/DETAIL.json
+          1. 詳細設計書をJSON形式で生成
+          2. その設計からGherkin受入基準を生成
+          3. 自己レビューを行い Pass/Fail を判定
 
-            DESIGN_JSON=$(cat design/DETAIL.json)
-            # Gherkin受け入れ基準生成
-            bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ: $DESIGN_JSON" --model gemini-2.5-flash --output-format json > requirements/Acceptance.feature
+          出力は必ず以下JSON形式:
+          {
+            \"design\": {...},
+            \"acceptance\": \"...\",
+            \"verdict\": \"pass\" or \"fail\"
+          }
+          " --model gemini-2.5-flash --output-format json)
 
-            # セルフレビュー
-            RESULT=$(bin/llm_run gemini "以下をレビューしてPass/FailをJSONで返せ:
-              $(cat design/DETAIL.json)
-              $(cat requirements/Acceptance.feature)" --output-format json)
-            VERDICT=$(echo $RESULT | jq -r .verdict)
+          echo "$RESULT" > full_result.json
 
-            echo "VERDICT=$VERDICT"
+          VERDICT=$(echo "$RESULT" | jq -r '.verdict')
 
-            if [ "$VERDICT" != "pass" ]; then
-              echo "Self-review failed, rewriting..."
-            fi
+          echo "$RESULT" | jq '.design' > design/DETAIL.json
+          echo "$RESULT" | jq -r '.acceptance' > requirements/Acceptance.feature
 
-            RETRY=$((RETRY+1))
-          done
+          echo "VERDICT=$VERDICT"
 
-          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
-
-          [ "$VERDICT" = "pass" ] || exit 1
+          if [ "$VERDICT" != "pass" ]; then
+            echo "Self-review failed"
+            exit 1
+          fi
 
       - name: Commit AI state.json
         if: always()
@@ -65,86 +67,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .ai/state.json
-          git commit -m "Update AI iteration to $ITERATION" || echo "No changes to commit"
+          git commit -m "Update AI iteration" || echo "No changes"
           git push
 
-      - name: Upload Design & Requirements
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-design-spec
-          path: |
-            design/DETAIL.md
-            requirements/Acceptance.feature
-
-  review-loop:
-    needs: design-loop
-    runs-on: self-hosted
-    outputs:
-      verdict: ${{ steps.review.outputs.verdict }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download Design & Requirements
-        uses: actions/download-artifact@v4
-        with:
-          name: ai-design-spec
-          path: .
-
-      - name: Review & Feedback Loop
-        id: review
-        run: |
-          MAX_RETRIES=3
-          RETRY=0
-          VERDICT="fail"
-
-          while [ "$VERDICT" != "pass" ] && [ $RETRY -lt $MAX_RETRIES ]; do
-            echo "Review Retry $RETRY"
-
-            # OpenCodeレビュー
-            RESULT=$(bin/llm_run opencode "design/DETAIL.md + requirements/Acceptance.feature をレビューしてPass/Failを返せ" --output-format json)
-
-            # Adapter独立レビュー
-            ADAPTER_RESULT=$(bin/adapter review design/DETAIL.md requirements/Acceptance.feature --json)
-
-            OPEN_VERDICT=$(jq -r '.verdict' <<< "$RESULT")
-            ADAPTER_VERDICT=$(jq -r '.verdict' <<< "$ADAPTER_RESULT")
-
-            if [ "$OPEN_VERDICT" != "pass" ] || [ "$ADAPTER_VERDICT" != "pass" ]; then
-              # Geminiで差戻しリライト
-              DESIGN_JSON=$(cat design/DETAIL.json)
-              bin/llm_run gemini "レビューでFailだった箇所を修正せよ: $DESIGN_JSON" --model gemini-2.5-flash --output-format json > design/DETAIL.json
-              # 受け入れ基準を再生成
-              DESIGN_JSON=$(cat design/DETAIL.json)
-              bin/llm_run gemini "以下の設計からGherkin受け入れ基準を作成せよ:$DESIGN_JSON" --model gemini-2.5-flash --output-format json > requirements/Acceptance.feature
-            fi
-
-            RETRY=$((RETRY+1))
-          done
-
-          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
-
-          [ "$VERDICT" = "pass" ] || exit 1
-
-      - name: Upload Final Design
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: final-ai-design
           path: |
             design/DETAIL.json
             requirements/Acceptance.feature
-
-  human-approval:
-    needs: review-loop
-    if: needs.review-loop.outputs.verdict == 'pass'
-    runs-on: self-hosted
-    environment: production-approval
-    steps:
-      - name: Human Approval (Antigravity)
-        run: |
-          # 差分確認
-          antigravity diff design/ requirements/
-          echo "承認チェックリストに従い PR Approve または Actions Environment Approval を実施"
-
-

@@ -1,0 +1,135 @@
+name: AI FULL Implementation Automation
+
+on:
+  workflow_dispatch: {}  # 手動キック or 他ワークフローからの dispatch 用
+
+permissions:
+  contents: write   # LLM 実装結果を push する場合に必要
+
+jobs:
+  implement-and-review:
+    runs-on: self-hosted
+    outputs:
+      verdict: ${{ steps.review-loop.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1) LLM によるコード実装
+      - name: Generate Implementation by OpenCode (Gemini 3 Pro)
+        id: impl
+        run: |
+          mkdir -p .ai impl
+
+          # ここでは詳細設計フェーズの成果物を前提
+          DESIGN_JSON=$(cat design/DETAIL.json)
+          ACCEPTANCE=$(cat requirements/Acceptance.feature)
+
+          # 実装用プロンプトは別ファイルに分離推奨（例: .github/prompts/impl_gen.txt）
+          PROMPT=$(cat .github/prompts/impl_gen.txt)
+
+          bin/llm_run opencode "$PROMPT
+          --- DESIGN_JSON ---
+          $DESIGN_JSON
+          --- ACCEPTANCE_CRITERIA ---
+          $ACCEPTANCE" \
+            --model gemini-3-pro \
+            --output-format files \
+            --output-dir impl
+
+          # LLM が impl ディレクトリ配下にコードを吐き出す前提
+          echo "implementation_dir=impl" >> $GITHUB_OUTPUT
+
+      # 2) Lint / Test 実行
+      - name: Run Lint & Test
+        id: lint-test
+        run: |
+          cd impl
+          # プロジェクトに合わせて修正:
+          npm install
+          npm run lint
+          npm test
+
+      # 3) レビュー・ループ
+      - name: Review Loop (Codex & OpenCode)
+        id: review-loop
+        run: |
+          set -e
+
+          IMPLEMENTATION_DIR="${{ steps.impl.outputs.implementation_dir }}"
+          MAX_RETRIES=3
+          RETRY=0
+          VERDICT="fail"
+
+          while [ "$VERDICT" != "pass" ] && [ $RETRY -lt $MAX_RETRIES ]; do
+            echo "==== Review Loop Try: $RETRY ===="
+
+            # レビュー対象コードをまとめる（例: git diff / ファイル一覧など）
+            CODE_SNIPPET=$(cd "$IMPLEMENTATION_DIR" && find . -type f -name '*.ts' -o -name '*.js' -o -name '*.py' | xargs -I{} sh -c 'echo "### {}"; cat "{}"' | head -c 8000)
+
+            # Codex（GPT-5.2）レビュー（JSON形式想定）
+            CODEX_RESULT=$(bin/llm_run codex "以下のコードをレビューし、Pass/Fail と修正指示を JSON({\"verdict\":\"pass|fail\",\"comments\":[...]}) で返せ:
+            $CODE_SNIPPET" --model gpt-5.2 --output-format json)
+
+            # OpenCode（Opus 4.5）レビュー
+            OPENCODE_RESULT=$(bin/llm_run opencode "以下のコードをレビューし、Pass/Fail と修正指示を JSON({\"verdict\":\"pass|fail\",\"comments\":[...]}) で返せ:
+            $CODE_SNIPPET" --model opus-4.5 --output-format json)
+
+            CODEX_VERDICT=$(echo "$CODEX_RESULT" | jq -r '.verdict')
+            OPEN_VERDICT=$(echo "$OPENCODE_RESULT" | jq -r '.verdict')
+
+            echo "Codex verdict: $CODEX_VERDICT"
+            echo "OpenCode verdict: $OPEN_VERDICT"
+
+            if [ "$CODEX_VERDICT" = "pass" ] && [ "$OPEN_VERDICT" = "pass" ]; then
+              VERDICT="pass"
+              break
+            fi
+
+            # Fail の場合、両方のコメントをマージして「修正指示」を組み立てる
+            FIX_INSTRUCTION=$(jq -n --argjson codex "$CODEX_RESULT" --argjson open "$OPENCODE_RESULT" '
+              {
+                codex: $codex.comments,
+                opencode: $open.comments
+              }')
+
+            echo "Fix instruction:"
+            echo "$FIX_INSTRUCTION"
+
+            # 修正指示を元に再実装
+            echo "Re-implementing with fix instructions..."
+            DESIGN_JSON=$(cat design/DETAIL.json)
+            ACCEPTANCE=$(cat requirements/Acceptance.feature)
+
+            bin/llm_run opencode "以下の設計・受け入れ基準とレビュー修正指示に基づき、コード一式を修正して出力せよ。
+            --- DESIGN_JSON ---
+            $DESIGN_JSON
+            --- ACCEPTANCE_CRITERIA ---
+            $ACCEPTANCE
+            --- REVIEW_FIX_INSTRUCTION(JSON) ---
+            $FIX_INSTRUCTION" \
+              --model gemini-3-pro \
+              --output-format files \
+              --output-dir "$IMPLEMENTATION_DIR"
+
+            # 再度 lint / test を実行（失敗時はその時点でジョブ失敗）
+            (cd "$IMPLEMENTATION_DIR" && npm run lint && npm test)
+
+            RETRY=$((RETRY+1))
+          done
+
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+
+          [ "$VERDICT" = "pass" ] || exit 1
+
+      # 4) 実装結果のコミット（任意）
+      - name: Commit Implementation
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp -R impl/* ./
+          git add .
+          git commit -m "AI implementation update" || echo "No changes to commit"
+          git push
