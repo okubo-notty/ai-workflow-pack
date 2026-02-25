@@ -1,155 +1,147 @@
-name: AI Full Design Automation (Safe Gemini CLI)
+name: Design Automation with 3-Loop (Gemini Flash Free Safe)
 
 on:
   workflow_dispatch:
+    inputs:
+      iteration:
+        description: '現在のループ回数 (手動実行時は1のままでOK)'
+        default: '1'
+        required: true
 
+# ✅ 同時実行を禁止（これが超重要）
 concurrency:
-  group: ai-design-free
+  group: design-automation
   cancel-in-progress: false
-
-permissions:
-  contents: write
 
 jobs:
   design-and-review:
     runs-on: self-hosted
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # -----------------------------
-      # Geminiツール制限
-      # -----------------------------
-      - name: Setup Gemini settings
+      - name: Git設定
         run: |
-          mkdir -p .gemini
-          cat > .gemini/settings.json << 'EOF'
-          {
-            "tools": {
-              "core": ["ReadFileTool", "GlobTool", "SearchText"]
-            },
-            "useWriteTodos": false,
-            "telemetry": { "enabled": false }
-          }
-          EOF
+          git config user.name "github-actions[ai-bot]"
+          git config user.email "ai-bot@users.noreply.github.com"
 
-      # -----------------------------
-      # AI設計・受入基準生成
-      # -----------------------------
-      - name: Generate Design + Acceptance
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ###########################################################
+      # 3. Gemini Flash (無料版) + 429完全回避ラッパー
+      ###########################################################
+      - name: 詳細設計生成 (Gemini Flash Free Safe)
         run: |
-          set -e
           mkdir -p design requirements .ai
 
-          # iteration管理
-          ITERATION=$(jq -r '.iteration // 0' .ai/state.json 2>/dev/null || echo 0)
-          ITERATION=$((ITERATION+1))
-          echo "{\"iteration\": $ITERATION}" > .ai/state.json
-
-          echo "Sleeping 3s..."
-          sleep 3
-
-          # ---------- 詳細設計 ----------
-          DESIGN_PROMPT="詳細設計書をJSON形式のテキストとして回答してください。
-          ファイル書き込み・コマンド実行・TODO作成は不要です。
-          stdoutにJSONのみを出力してください。"
-
-          RAW=$(gemini -p "$DESIGN_PROMPT" \
-            --output-format json \
-            --approval-mode auto_edit)
-
-          # stdoutからJSON部分だけ抽出
-          JSON=$(echo "$RAW" | sed -n '/^{/,/^}$/p')
-
-          # JSON妥当性チェック
-          if ! echo "$JSON" | jq -e . >/dev/null; then
-            echo "Gemini did not return valid JSON"
-            echo "$RAW"
-            exit 1
+          if [ "${{ github.event.inputs.iteration }}" == "1" ]; then
+            PROMPT="requirements/BRD.md の要件を満たす詳細設計書(DETAIL.md)とGherkinテストを作成してください。Markdown形式で出力すること。"
+          else
+            FIX_INST=$(cat .ai/fix_instructions.txt)
+            PROMPT="前回の設計に対する以下のレビュー指摘を修正し、完璧な詳細設計書を再出力してください。指摘: $FIX_INST"
           fi
 
-          # .response抽出して保存
-          echo "$JSON" | jq -r '.response' | jq . > design/DETAIL.json
+          #########################################
+          # ✅ 429絶対回避：指数バックオフ無限リトライ
+          #########################################
+          ATTEMPT=0
+          MAX_WAIT=120
 
-          # ---------- 受入基準 ----------
-          ACCEPT_PROMPT="以下の設計からGherkin受入基準を生成してください。
-          ファイル操作やツール呼び出しは不要です。
-          stdoutにJSONのみを出力してください。"
+          while true
+          do
+            ATTEMPT=$((ATTEMPT+1))
+            echo "Gemini呼び出し試行: $ATTEMPT"
 
-          RAW_ACC=$(cat design/DETAIL.json \
-            | gemini -p "$ACCEPT_PROMPT" \
-              --output-format json \
-              --approval-mode auto_edit)
+            # 少し待ってから実行（無料枠保護）
+            SLEEP_TIME=$(( (RANDOM % 5) + 5 ))
+            echo "事前スリープ ${SLEEP_TIME}s"
+            sleep $SLEEP_TIME
 
-          JSON_ACC=$(echo "$RAW_ACC" | sed -n '/^{/,/^}$/p')
-          if ! echo "$JSON_ACC" | jq -e . >/dev/null; then
-            echo "Gemini did not return valid JSON for Acceptance"
-            echo "$RAW_ACC"
-            exit 1
+            # gemini-1.5-flash を明示指定
+            if bin/llm_run gemini-flash "$PROMPT" > design/DETAIL.md 2>error.log; then
+              echo "Gemini成功"
+              break
+            fi
+
+            # 429検出
+            if grep -q "429" error.log; then
+              WAIT=$(( 2 ** ATTEMPT ))
+              if [ $WAIT -gt $MAX_WAIT ]; then
+                WAIT=$MAX_WAIT
+              fi
+              echo "429検出。${WAIT}秒待機して再試行..."
+              sleep $WAIT
+            else
+              echo "APIエラー。10秒後に再試行..."
+              sleep 10
+            fi
+          done
+
+      ###########################################################
+      # 4. AIレビュー（こちらも安全化）
+      ###########################################################
+      - name: AIレビュー
+        id: review
+        run: |
+          PROMPT="design/DETAIL.md を読み込み、要件定義として実装可能か厳格にレビューせよ。必ず以下のJSON形式で出力すること。 {\"verdict\": \"pass\" または \"fail\", \"rewrite_instructions\": \"Failの場合の具体的な修正指示\"}"
+
+          ATTEMPT=0
+          while true
+          do
+            ATTEMPT=$((ATTEMPT+1))
+            sleep 5
+
+            if RESULT=$(bin/llm_run opencode "$PROMPT" 2>error.log); then
+              break
+            fi
+
+            if grep -q "429" error.log; then
+              WAIT=$(( 2 ** ATTEMPT ))
+              echo "Review 429。${WAIT}s待機..."
+              sleep $WAIT
+            else
+              sleep 10
+            fi
+          done
+
+          VERDICT=$(echo $RESULT | jq -r .verdict)
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+
+          if [ "$VERDICT" == "fail" ]; then
+            echo $RESULT | jq -r .rewrite_instructions > .ai/fix_instructions.txt
           fi
 
-          echo "$JSON_ACC" | jq -r '.response' > requirements/Acceptance.feature
+      ###########################################################
+      # Git保存
+      ###########################################################
+      - name: Gitコミット
+        run: |
+          git add design/DETAIL.md .ai/fix_instructions.txt || true
+          git commit -m "AI Update: Design iteration ${{ github.event.inputs.iteration }}" || true
+          git push origin HEAD
 
-      # -----------------------------
-      # AIレビュー
-      # -----------------------------
-      - name: Review Design
+      ###########################################################
+      # ループ制御
+      ###########################################################
+      - name: Fail時リトライ
+        if: steps.review.outputs.verdict == 'fail' && github.event.inputs.iteration < 3
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          NEXT_ITER=$((${{ github.event.inputs.iteration }} + 1))
+          sleep 20  # 無料枠保護
+          gh workflow run design-automation.yml -f iteration=$NEXT_ITER
 
-          REVIEW_PROMPT="design/DETAIL.json と requirements/Acceptance.feature をレビューし、
-          以下のJSON構造でテキストとして回答してください。
-          ファイル操作は不要です。
-
-          {
-            \"verdict\": \"pass|fail\",
-            \"issues\": [],
-            \"score\": 0
-          }"
-
-          RAW_REVIEW=$(cat design/DETAIL.json requirements/Acceptance.feature \
-            | gemini -p "$REVIEW_PROMPT" \
-              --output-format json \
-              --approval-mode auto_edit)
-
-          JSON_REVIEW=$(echo "$RAW_REVIEW" | sed -n '/^{/,/^}$/p')
-          if ! echo "$JSON_REVIEW" | jq -e . >/dev/null; then
-            echo "Gemini did not return valid JSON for Review"
-            echo "$RAW_REVIEW"
-            exit 1
-          fi
-
-          echo "$JSON_REVIEW" | jq -r '.response' > review.json
-
-          VERDICT=$(jq -r '.verdict' review.json)
-          if [ "$VERDICT" != "pass" ]; then
-            echo "Review failed"
-            exit 1
-          fi
-
-      # -----------------------------
-      # State更新 & アップロード
-      # -----------------------------
-      - name: Commit AI state.json
-        if: always()
+      - name: 3回Fail
+        if: steps.review.outputs.verdict == 'fail' && github.event.inputs.iteration == '3'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .ai/state.json
-          git commit -m "Update AI iteration" || echo "No changes"
-          git push
+          echo "::error::3回失敗。人間介入が必要。"
+          exit 1
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-ai-design
-          path: |
-            design/DETAIL.json
-            requirements/Acceptance.feature
-            review.json
+  human-approval:
+    needs: design-and-review
+    if: needs.design-and-review.outputs.verdict == 'pass'
+    runs-on: ubuntu-latest
+    environment: production-approval
+    steps:
+      - run: echo "🎉 AIレビュー通過。最終承認してください。"

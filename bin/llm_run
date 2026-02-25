@@ -1,31 +1,36 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env bash
 
-TOOL="${1:-}"
-shift || true
+MODEL="gemini-1.5-flash"
 
-case "$TOOL" in
-  gemini)
-    # 常に JSON envelope で受け取る
-    RAW=$(gemini "$@" --output-format json --approval-mode auto_edit)
+PROMPT="$2"
 
-    # エラー確認
-    ERROR=$(echo "$RAW" | jq -r '.error.message? // empty')
-    if [ -n "$ERROR" ]; then
-      echo "Gemini error: $ERROR" >&2
-      exit 1
+ATTEMPT=0
+MAX_WAIT=120
+
+while true
+do
+  ATTEMPT=$((ATTEMPT+1))
+
+  # バースト防止
+  sleep $(( (RANDOM % 5) + 5 ))
+
+  OUTPUT=$(gcloud ai models generate-content \
+    --model=$MODEL \
+    --content="$PROMPT" 2>error.log)
+
+  if [ $? -eq 0 ]; then
+    echo "$OUTPUT" | jq -r '.candidates[0].content.parts[0].text'
+    exit 0
+  fi
+
+  if grep -q "429" error.log; then
+    WAIT=$(( 2 ** ATTEMPT ))
+    if [ $WAIT -gt $MAX_WAIT ]; then
+      WAIT=$MAX_WAIT
     fi
-
-    # 本文だけ stdout に返す
-    echo "$RAW" | jq -r '.response'
-    ;;
-
-  opencode)
-    opencode "$@" --format json
-    ;;
-
-  *)
-    echo "Usage: $0 [gemini|opencode] <args>"
-    exit 1
-    ;;
-esac
+    echo "429検出。${WAIT}s待機..."
+    sleep $WAIT
+  else
+    sleep 10
+  fi
+done
