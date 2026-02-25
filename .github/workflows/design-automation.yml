@@ -1,4 +1,4 @@
-name: Design Automation (Self-Hosted / Gemini Self-Review + OpenCode Review)
+name: Design Automation (Self-Hosted / Gemini + OpenCode)
 
 on:
   workflow_dispatch:
@@ -21,9 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      ###########################################################
+      # -----------------------------
       # 1️⃣ Gemini ツール制限
-      ###########################################################
+      # -----------------------------
       - name: Setup Gemini Tool Restriction
         run: |
           mkdir -p .gemini
@@ -37,57 +37,41 @@ jobs:
           }
           EOF
 
-      ###########################################################
+      # -----------------------------
       # 2️⃣ 詳細設計生成 + Geminiセルフレビュー
-      ###########################################################
-      - name: Generate Design (with Gemini Self-Review)
+      # -----------------------------
+      - name: Generate Design (Gemini Self-Review)
         run: |
           mkdir -p design requirements .ai
 
           if [ "${{ github.event.inputs.iteration }}" == "1" ]; then
             BASE_PROMPT="requirements/BRD.md の要件を基に詳細設計書とGherkinテストを作成してください。"
           else
-            FIX_INST=$(cat .ai/fix_instructions.txt)
+            FIX_INST=$(<.ai/fix_instructions.txt)
             BASE_PROMPT="前回のレビュー指摘を反映して設計書を再生成してください。
             修正指示: $FIX_INST"
           fi
 
-          PROMPT="$BASE_PROMPT
+          FILE_CONTENT=$(<requirements/BRD.md)
+          PROMPT="$FILE_CONTENT"$'\n'"$BASE_PROMPT"$'\n'"--- 手順 ---"$'\n'"1. 詳細設計書を作成する。"$'\n'"2. その設計を自己レビューする。"$'\n'"3. 問題があれば修正する。"$'\n'"4. 最終版のみMarkdownで出力する。"$'\n'"出力は最終設計書のみ。"
 
-          --- 手順 ---
-          1. 詳細設計書を作成する。
-          2. その設計を自己レビューする（要件網羅性・実装可能性・曖昧性）。
-          3. 問題があれば修正する。
-          4. 最終版のみMarkdownで出力する。
-
-          出力は最終設計書のみ。
-          ファイル操作・コマンド実行・TODO作成は禁止。
-          stdoutにMarkdownテキストとして出力すること。"
-
-          RESULT=$(cat requirements/BRD.md 2>/dev/null \
-            | gemini --model gemini-2.5-pro \
-              -p "$PROMPT" \
-              --output-format json)
-
+          RESULT=$(bin/llm_run gemini "$PROMPT")
           echo "$RESULT" | jq -r '.response' > design/DETAIL.md
 
-      ###########################################################
+      # -----------------------------
       # 3️⃣ OpenCodeによるAIレビュー
-      ###########################################################
+      # -----------------------------
       - name: AI Review by OpenCode
         id: review
         run: |
-          PROMPT="design/DETAIL.md を読み込み、
-          要件定義として実装可能か厳格にレビューせよ。
-
-          必ず以下のJSON形式で回答せよ：
+          FILE_CONTENT=$(<design/DETAIL.md)
+          PROMPT="$FILE_CONTENT"$'\n'"要件定義として実装可能か厳格にレビューせよ。"$'\n'"必ず以下のJSON形式で回答せよ：
           {
             \"verdict\": \"pass\" または \"fail\",
             \"rewrite_instructions\": \"Failの場合の具体的修正指示\"
           }"
 
           RESULT=$(bin/llm_run opencode "$PROMPT")
-
           echo "$RESULT" > review.json
 
           VERDICT=$(echo "$RESULT" | jq -r '.verdict')
@@ -97,9 +81,30 @@ jobs:
             echo "$RESULT" | jq -r '.rewrite_instructions' > .ai/fix_instructions.txt
           fi
 
-      ###########################################################
-      # 4️⃣ Git保存
-      ###########################################################
+      # -----------------------------
+      # 4️⃣ Google Antigravity による承認フロー
+      # -----------------------------
+      - name: Antigravity Diff Check
+        if: steps.review.outputs.verdict == 'pass'
+        run: |
+          antigravity diff design/ requirements/
+
+      - name: Human Approval (GitHub Environment)
+        if: steps.review.outputs.verdict == 'pass'
+        uses: hmarr/auto-approve-action@v2
+        with:
+          environment: production-approval
+
+      - name: Save Final AI Design
+        if: steps.review.outputs.verdict == 'pass'
+        run: |
+          mkdir -p final
+          cp design/DETAIL.md final-ai-design.yaml
+          echo "最終成果物を final-ai-design.yaml として保存"
+
+      # -----------------------------
+      # 5️⃣ Git保存
+      # -----------------------------
       - name: Commit Results
         run: |
           git config user.name "github-actions[ai-bot]"
@@ -108,9 +113,9 @@ jobs:
           git commit -m "AI Update: iteration ${{ github.event.inputs.iteration }}" || true
           git push origin HEAD
 
-      ###########################################################
-      # 5️⃣ Fail時リトライ
-      ###########################################################
+      # -----------------------------
+      # 6️⃣ Fail時リトライ
+      # -----------------------------
       - name: Retry if Fail
         if: steps.review.outputs.verdict == 'fail' && github.event.inputs.iteration < 3
         env:
@@ -119,9 +124,9 @@ jobs:
           NEXT_ITER=$((${{ github.event.inputs.iteration }} + 1))
           gh workflow run "${{ github.workflow }}" -f iteration=$NEXT_ITER
 
-      ###########################################################
-      # 6️⃣ 3回Failで停止
-      ###########################################################
+      # -----------------------------
+      # 7️⃣ 3回Failで停止
+      # -----------------------------
       - name: Stop after 3 fails
         if: steps.review.outputs.verdict == 'fail' && github.event.inputs.iteration == '3'
         run: |
