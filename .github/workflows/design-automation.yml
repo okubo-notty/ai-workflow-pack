@@ -20,9 +20,9 @@ jobs:
           fetch-depth: 0
 
       # -----------------------------
-      # Layer 2: ツール制限
+      # Geminiツール制限
       # -----------------------------
-      - name: Setup Gemini settings (tool restriction)
+      - name: Setup Gemini settings
         run: |
           mkdir -p .gemini
           cat > .gemini/settings.json << 'EOF'
@@ -36,7 +36,7 @@ jobs:
           EOF
 
       # -----------------------------
-      # Generate Design + Acceptance
+      # AI設計・受入基準生成
       # -----------------------------
       - name: Generate Design + Acceptance
         env:
@@ -53,45 +53,49 @@ jobs:
           echo "Sleeping 3s..."
           sleep 3
 
-          ############################################
-          # Layer 1 + 3: stdout受信 + 明示的制約プロンプト
-          ############################################
-
+          # ---------- 詳細設計 ----------
           DESIGN_PROMPT="詳細設計書をJSON形式のテキストとして回答してください。
-          ファイル書き込み・コマンド実行・TODO作成は一切不要です。
+          ファイル書き込み・コマンド実行・TODO作成は不要です。
           stdoutにJSONのみを出力してください。"
 
-          DESIGN_RAW=$(gemini -p "$DESIGN_PROMPT" \
+          RAW=$(gemini -p "$DESIGN_PROMPT" \
             --output-format json \
-            --approval-mode auto_edit \
-            2>/dev/null)
+            --approval-mode auto_edit)
 
-          # エラー確認
-          if ! echo "$DESIGN_RAW" | jq -e . >/dev/null; then
+          # stdoutからJSON部分だけ抽出
+          JSON=$(echo "$RAW" | sed -n '/^{/,/^}$/p')
+
+          # JSON妥当性チェック
+          if ! echo "$JSON" | jq -e . >/dev/null; then
             echo "Gemini did not return valid JSON"
-            echo "$DESIGN_RAW"
+            echo "$RAW"
             exit 1
           fi
 
-          # envelope から本文抽出
-          echo "$DESIGN_RAW" | jq -r '.response' | jq . > design/DETAIL.json
-          ############################################
-          # Acceptance生成
-          ############################################
+          # .response抽出して保存
+          echo "$JSON" | jq -r '.response' | jq . > design/DETAIL.json
 
+          # ---------- 受入基準 ----------
           ACCEPT_PROMPT="以下の設計からGherkin受入基準を生成してください。
           ファイル操作やツール呼び出しは不要です。
-          テキストとしてstdoutに出力してください。"
+          stdoutにJSONのみを出力してください。"
 
-          ACCEPT_RAW=$(cat design/DETAIL.json \
+          RAW_ACC=$(cat design/DETAIL.json \
             | gemini -p "$ACCEPT_PROMPT" \
               --output-format json \
               --approval-mode auto_edit)
 
-          echo "$ACCEPT_RAW" | jq -r '.response' > requirements/Acceptance.feature
+          JSON_ACC=$(echo "$RAW_ACC" | sed -n '/^{/,/^}$/p')
+          if ! echo "$JSON_ACC" | jq -e . >/dev/null; then
+            echo "Gemini did not return valid JSON for Acceptance"
+            echo "$RAW_ACC"
+            exit 1
+          fi
+
+          echo "$JSON_ACC" | jq -r '.response' > requirements/Acceptance.feature
 
       # -----------------------------
-      # Review (Geminiで統一)
+      # AIレビュー
       # -----------------------------
       - name: Review Design
         env:
@@ -109,20 +113,29 @@ jobs:
             \"score\": 0
           }"
 
-          REVIEW_RAW=$(cat design/DETAIL.json requirements/Acceptance.feature \
+          RAW_REVIEW=$(cat design/DETAIL.json requirements/Acceptance.feature \
             | gemini -p "$REVIEW_PROMPT" \
               --output-format json \
               --approval-mode auto_edit)
 
-          echo "$REVIEW_RAW" | jq -r '.response' > review.json
+          JSON_REVIEW=$(echo "$RAW_REVIEW" | sed -n '/^{/,/^}$/p')
+          if ! echo "$JSON_REVIEW" | jq -e . >/dev/null; then
+            echo "Gemini did not return valid JSON for Review"
+            echo "$RAW_REVIEW"
+            exit 1
+          fi
+
+          echo "$JSON_REVIEW" | jq -r '.response' > review.json
 
           VERDICT=$(jq -r '.verdict' review.json)
-
           if [ "$VERDICT" != "pass" ]; then
             echo "Review failed"
             exit 1
           fi
 
+      # -----------------------------
+      # State更新 & アップロード
+      # -----------------------------
       - name: Commit AI state.json
         if: always()
         run: |
