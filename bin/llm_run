@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-MODEL="gemini-1.5-flash"
+MODEL="gemini-2.5-flash"
 
 PROMPT="$2"
 
