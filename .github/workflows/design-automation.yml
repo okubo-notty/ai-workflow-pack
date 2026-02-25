@@ -65,7 +65,7 @@ jobs:
           stdoutにMarkdownテキストとして出力すること。"
 
           RESULT=$(cat requirements/BRD.md 2>/dev/null \
-            | gemini --model gemini-1.5-flash \
+            | gemini --model gemini-2.5-flash \
               -p "$PROMPT" \
               --output-format json)
 
