@@ -67,8 +67,7 @@ jobs:
           RESULT=$(cat requirements/BRD.md 2>/dev/null \
             | gemini --model gemini-1.5-flash \
               -p "$PROMPT" \
-              --output-format json \
-              --approval-mode plan)
+              --output-format json)
 
           echo "$RESULT" | jq -r '.response' > design/DETAIL.md
 
