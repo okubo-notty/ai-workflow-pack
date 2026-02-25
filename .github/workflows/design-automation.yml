@@ -63,11 +63,18 @@ jobs:
 
           DESIGN_RAW=$(gemini -p "$DESIGN_PROMPT" \
             --output-format json \
-            --approval-mode auto_edit)
+            --approval-mode auto_edit \
+            2>/dev/null)
+
+          # エラー確認
+          if ! echo "$DESIGN_RAW" | jq -e . >/dev/null; then
+            echo "Gemini did not return valid JSON"
+            echo "$DESIGN_RAW"
+            exit 1
+          fi
 
           # envelope から本文抽出
           echo "$DESIGN_RAW" | jq -r '.response' | jq . > design/DETAIL.json
-
           ############################################
           # Acceptance生成
           ############################################
