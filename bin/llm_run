@@ -1,9 +1,31 @@
 #!/bin/bash
-TOOL=$1
-shift
+set -euo pipefail
 
-if [ "$TOOL" == "gemini" ]; then
-  gemini "$@"
-elif [ "$TOOL" == "opencode" ]; then
-  opencode -m opus-4.5 "$@" --format json
-fi
+TOOL="${1:-}"
+shift || true
+
+case "$TOOL" in
+  gemini)
+    # 常に JSON envelope で受け取る
+    RAW=$(gemini "$@" --output-format json --approval-mode auto_edit)
+
+    # エラー確認
+    ERROR=$(echo "$RAW" | jq -r '.error.message? // empty')
+    if [ -n "$ERROR" ]; then
+      echo "Gemini error: $ERROR" >&2
+      exit 1
+    fi
+
+    # 本文だけ stdout に返す
+    echo "$RAW" | jq -r '.response'
+    ;;
+
+  opencode)
+    opencode "$@" --format json
+    ;;
+
+  *)
+    echo "Usage: $0 [gemini|opencode] <args>"
+    exit 1
+    ;;
+esac

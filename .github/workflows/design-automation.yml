@@ -1,4 +1,4 @@
-name: AI Full Design Automation
+name: AI Full Design Automation (Safe Gemini CLI)
 
 on:
   workflow_dispatch:
@@ -19,7 +19,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      # -----------------------------
+      # Layer 2: ツール制限
+      # -----------------------------
+      - name: Setup Gemini settings (tool restriction)
+        run: |
+          mkdir -p .gemini
+          cat > .gemini/settings.json << 'EOF'
+          {
+            "tools": {
+              "core": ["ReadFileTool", "GlobTool", "SearchText"]
+            },
+            "useWriteTodos": false,
+            "telemetry": { "enabled": false }
+          }
+          EOF
+
+      # -----------------------------
+      # Generate Design + Acceptance
+      # -----------------------------
       - name: Generate Design + Acceptance
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
           mkdir -p design requirements .ai
@@ -29,38 +50,66 @@ jobs:
           ITERATION=$((ITERATION+1))
           echo "{\"iteration\": $ITERATION}" > .ai/state.json
 
-          echo "Sleeping 5s..."
-          sleep 5
+          echo "Sleeping 3s..."
+          sleep 3
 
-          echo "Generating design..."
-          DESIGN_JSON=$(bin/llm_run gemini \
-            -p "詳細設計書をJSON形式で生成せよ。" \
-            -m gemini-2.5-flash \
-            --approval-mode plan \
-            -o json)
+          ############################################
+          # Layer 1 + 3: stdout受信 + 明示的制約プロンプト
+          ############################################
 
-          echo "$DESIGN_JSON" | jq . > design/DETAIL.json
+          DESIGN_PROMPT="詳細設計書をJSON形式のテキストとして回答してください。
+          ファイル書き込み・コマンド実行・TODO作成は一切不要です。
+          stdoutにJSONのみを出力してください。"
 
-          echo "Generating acceptance criteria..."
-          ACCEPTANCE=$(bin/llm_run gemini \
-            "以下の設計からGherkin受入基準を生成せよ: $DESIGN_JSON" \
-            -m gemini-2.5-flash \
-            --approval-mode plan \
-            -o json)
+          DESIGN_RAW=$(gemini -p "$DESIGN_PROMPT" \
+            --output-format json \
+            --approval-mode auto_edit)
 
-          echo "$ACCEPTANCE" > requirements/Acceptance.feature
+          # envelope から本文抽出
+          echo "$DESIGN_RAW" | jq -r '.response' | jq . > design/DETAIL.json
 
-      - name: OpenCode Review
+          ############################################
+          # Acceptance生成
+          ############################################
+
+          ACCEPT_PROMPT="以下の設計からGherkin受入基準を生成してください。
+          ファイル操作やツール呼び出しは不要です。
+          テキストとしてstdoutに出力してください。"
+
+          ACCEPT_RAW=$(cat design/DETAIL.json \
+            | gemini -p "$ACCEPT_PROMPT" \
+              --output-format json \
+              --approval-mode auto_edit)
+
+          echo "$ACCEPT_RAW" | jq -r '.response' > requirements/Acceptance.feature
+
+      # -----------------------------
+      # Review (Geminiで統一)
+      # -----------------------------
+      - name: Review Design
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
 
-          echo "Running OpenCode review..."
-          OPEN_RESULT=$(bin/llm_run opencode \
-            "design/DETAIL.json と requirements/Acceptance.feature をレビューして Pass/Fail を JSON で返せ")
+          REVIEW_PROMPT="design/DETAIL.json と requirements/Acceptance.feature をレビューし、
+          以下のJSON構造でテキストとして回答してください。
+          ファイル操作は不要です。
 
-          echo "$OPEN_RESULT"
+          {
+            \"verdict\": \"pass|fail\",
+            \"issues\": [],
+            \"score\": 0
+          }"
 
-          VERDICT=$(echo "$OPEN_RESULT" | jq -r '.verdict')
+          REVIEW_RAW=$(cat design/DETAIL.json requirements/Acceptance.feature \
+            | gemini -p "$REVIEW_PROMPT" \
+              --output-format json \
+              --approval-mode auto_edit)
+
+          echo "$REVIEW_RAW" | jq -r '.response' > review.json
+
+          VERDICT=$(jq -r '.verdict' review.json)
 
           if [ "$VERDICT" != "pass" ]; then
             echo "Review failed"
@@ -83,3 +132,4 @@ jobs:
           path: |
             design/DETAIL.json
             requirements/Acceptance.feature
+            review.json
