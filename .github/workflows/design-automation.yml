@@ -1,14 +1,13 @@
-name: Design Automation with 3-Loop (Gemini Flash Free Safe)
+name: Design Automation (Self-Hosted / Gemini Self-Review + OpenCode Review)
 
 on:
   workflow_dispatch:
     inputs:
       iteration:
-        description: '現在のループ回数 (手動実行時は1のままでOK)'
+        description: '現在のループ回数'
         default: '1'
         required: true
 
-# ✅ 同時実行を禁止（これが超重要）
 concurrency:
   group: design-automation
   cancel-in-progress: false
@@ -22,126 +21,110 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Git設定
+      ###########################################################
+      # 1️⃣ Gemini ツール制限
+      ###########################################################
+      - name: Setup Gemini Tool Restriction
         run: |
-          git config user.name "github-actions[ai-bot]"
-          git config user.email "ai-bot@users.noreply.github.com"
+          mkdir -p .gemini
+          cat > .gemini/settings.json << 'EOF'
+          {
+            "tools": {
+              "core": ["ReadFileTool", "GlobTool", "SearchText"]
+            },
+            "useWriteTodos": false,
+            "telemetry": { "enabled": false }
+          }
+          EOF
 
       ###########################################################
-      # 3. Gemini Flash (無料版) + 429完全回避ラッパー
+      # 2️⃣ 詳細設計生成 + Geminiセルフレビュー
       ###########################################################
-      - name: 詳細設計生成 (Gemini Flash Free Safe)
+      - name: Generate Design (with Gemini Self-Review)
         run: |
           mkdir -p design requirements .ai
 
           if [ "${{ github.event.inputs.iteration }}" == "1" ]; then
-            PROMPT="requirements/BRD.md の要件を満たす詳細設計書(DETAIL.md)とGherkinテストを作成してください。Markdown形式で出力すること。"
+            BASE_PROMPT="requirements/BRD.md の要件を基に詳細設計書とGherkinテストを作成してください。"
           else
             FIX_INST=$(cat .ai/fix_instructions.txt)
-            PROMPT="前回の設計に対する以下のレビュー指摘を修正し、完璧な詳細設計書を再出力してください。指摘: $FIX_INST"
+            BASE_PROMPT="前回のレビュー指摘を反映して設計書を再生成してください。
+            修正指示: $FIX_INST"
           fi
 
-          #########################################
-          # ✅ 429絶対回避：指数バックオフ無限リトライ
-          #########################################
-          ATTEMPT=0
-          MAX_WAIT=120
+          PROMPT="$BASE_PROMPT
 
-          while true
-          do
-            ATTEMPT=$((ATTEMPT+1))
-            echo "Gemini呼び出し試行: $ATTEMPT"
+          --- 手順 ---
+          1. 詳細設計書を作成する。
+          2. その設計を自己レビューする（要件網羅性・実装可能性・曖昧性）。
+          3. 問題があれば修正する。
+          4. 最終版のみMarkdownで出力する。
 
-            # 少し待ってから実行（無料枠保護）
-            SLEEP_TIME=$(( (RANDOM % 5) + 5 ))
-            echo "事前スリープ ${SLEEP_TIME}s"
-            sleep $SLEEP_TIME
+          出力は最終設計書のみ。
+          ファイル操作・コマンド実行・TODO作成は禁止。
+          stdoutにMarkdownテキストとして出力すること。"
 
-            # gemini-1.5-flash を明示指定
-            if bin/llm_run gemini-flash "$PROMPT" > design/DETAIL.md 2>error.log; then
-              echo "Gemini成功"
-              break
-            fi
+          RESULT=$(cat requirements/BRD.md 2>/dev/null \
+            | gemini --model gemini-1.5-flash \
+              -p "$PROMPT" \
+              --output-format json \
+              --approval-mode auto)
 
-            # 429検出
-            if grep -q "429" error.log; then
-              WAIT=$(( 2 ** ATTEMPT ))
-              if [ $WAIT -gt $MAX_WAIT ]; then
-                WAIT=$MAX_WAIT
-              fi
-              echo "429検出。${WAIT}秒待機して再試行..."
-              sleep $WAIT
-            else
-              echo "APIエラー。10秒後に再試行..."
-              sleep 10
-            fi
-          done
+          echo "$RESULT" | jq -r '.response' > design/DETAIL.md
 
       ###########################################################
-      # 4. AIレビュー（こちらも安全化）
+      # 3️⃣ OpenCodeによるAIレビュー
       ###########################################################
-      - name: AIレビュー
+      - name: AI Review by OpenCode
         id: review
         run: |
-          PROMPT="design/DETAIL.md を読み込み、要件定義として実装可能か厳格にレビューせよ。必ず以下のJSON形式で出力すること。 {\"verdict\": \"pass\" または \"fail\", \"rewrite_instructions\": \"Failの場合の具体的な修正指示\"}"
+          PROMPT="design/DETAIL.md を読み込み、
+          要件定義として実装可能か厳格にレビューせよ。
 
-          ATTEMPT=0
-          while true
-          do
-            ATTEMPT=$((ATTEMPT+1))
-            sleep 5
+          必ず以下のJSON形式で回答せよ：
+          {
+            \"verdict\": \"pass\" または \"fail\",
+            \"rewrite_instructions\": \"Failの場合の具体的修正指示\"
+          }"
 
-            if RESULT=$(bin/llm_run opencode "$PROMPT" 2>error.log); then
-              break
-            fi
+          RESULT=$(bin/llm_run opencode "$PROMPT")
 
-            if grep -q "429" error.log; then
-              WAIT=$(( 2 ** ATTEMPT ))
-              echo "Review 429。${WAIT}s待機..."
-              sleep $WAIT
-            else
-              sleep 10
-            fi
-          done
+          echo "$RESULT" > review.json
 
-          VERDICT=$(echo $RESULT | jq -r .verdict)
+          VERDICT=$(echo "$RESULT" | jq -r '.verdict')
           echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
 
           if [ "$VERDICT" == "fail" ]; then
-            echo $RESULT | jq -r .rewrite_instructions > .ai/fix_instructions.txt
+            echo "$RESULT" | jq -r '.rewrite_instructions' > .ai/fix_instructions.txt
           fi
 
       ###########################################################
-      # Git保存
+      # 4️⃣ Git保存
       ###########################################################
-      - name: Gitコミット
+      - name: Commit Results
         run: |
-          git add design/DETAIL.md .ai/fix_instructions.txt || true
-          git commit -m "AI Update: Design iteration ${{ github.event.inputs.iteration }}" || true
+          git config user.name "github-actions[ai-bot]"
+          git config user.email "ai-bot@users.noreply.github.com"
+          git add design/DETAIL.md review.json .ai/fix_instructions.txt || true
+          git commit -m "AI Update: iteration ${{ github.event.inputs.iteration }}" || true
           git push origin HEAD
 
       ###########################################################
-      # ループ制御
+      # 5️⃣ Fail時リトライ
       ###########################################################
-      - name: Fail時リトライ
+      - name: Retry if Fail
         if: steps.review.outputs.verdict == 'fail' && github.event.inputs.iteration < 3
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NEXT_ITER=$((${{ github.event.inputs.iteration }} + 1))
-          sleep 20  # 無料枠保護
-          gh workflow run design-automation.yml -f iteration=$NEXT_ITER
+          gh workflow run "${{ github.workflow }}" -f iteration=$NEXT_ITER
 
-      - name: 3回Fail
+      ###########################################################
+      # 6️⃣ 3回Failで停止
+      ###########################################################
+      - name: Stop after 3 fails
         if: steps.review.outputs.verdict == 'fail' && github.event.inputs.iteration == '3'
         run: |
-          echo "::error::3回失敗。人間介入が必要。"
+          echo "::error::3回失敗しました。人間の介入が必要です。"
           exit 1
-
-  human-approval:
-    needs: design-and-review
-    if: needs.design-and-review.outputs.verdict == 'pass'
-    runs-on: ubuntu-latest
-    environment: production-approval
-    steps:
-      - run: echo "🎉 AIレビュー通過。最終承認してください。"
