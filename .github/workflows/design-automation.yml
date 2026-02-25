@@ -68,7 +68,7 @@ jobs:
             | gemini --model gemini-1.5-flash \
               -p "$PROMPT" \
               --output-format json \
-              --approval-mode auto)
+              --approval-mode plan)
 
           echo "$RESULT" | jq -r '.response' > design/DETAIL.md
 
