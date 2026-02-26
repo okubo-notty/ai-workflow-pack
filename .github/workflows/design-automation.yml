@@ -38,14 +38,14 @@ jobs:
           EOF
 
       ###########################################################
-      # 2️⃣ BRD.md 自動生成 (prompts/design_gen.txt 参照)
+      # 2️⃣ BRD.md 自動生成 (.github/prompts/design_gen.txt 参照)
       ###########################################################
       - name: Generate BRD.md if missing
         run: |
           mkdir -p requirements
-          PROMPT_FILE="github/prompts/design_gen.txt"
+          PROMPT_FILE="./github/prompts/design_gen.txt"
           if [ ! -f "$PROMPT_FILE" ]; then
-            echo "::error::${PROMPT_FILE} が存在しないため生成中..."
+            echo "::error::${PROMPT_FILE} が存在しません。"
             exit 1
           fi
 
