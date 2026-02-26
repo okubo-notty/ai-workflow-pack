@@ -43,14 +43,20 @@ jobs:
       - name: Generate BRD.md if missing
         run: |
           mkdir -p requirements
+          PROMPT_FILE="github/prompts/design_gen.txt"
+          if [ ! -f "$PROMPT_FILE" ]; then
+            echo "::error::${PROMPT_FILE} が存在しないため生成中..."
+            exit 1
+          fi
+
           if [ ! -f requirements/BRD.md ]; then
             echo "requirements/BRD.md が存在しないため生成中..."
-            PROMPT=$(<prompts/design_gen.txt)
+            PROMPT=$(<"$PROMPT_FILE")
             RESULT=$(bin/llm_run gemini "$PROMPT")
-            echo "$RESULT" | jq -r '.response' > requirements/BRD.md
-            echo "requirements/BRD.md を生成しました"
+            echo "$RESULT" | jq -r `.response` > requirements/BRD.md
+            echo "requirements/BRD.mdを生成しました"
           else
-            echo "requirements/BRD.md が既に存在します"
+            echo "requirements/BRD.md がすでに存在します。"
           fi
 
       ###########################################################
