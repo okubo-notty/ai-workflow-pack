@@ -43,7 +43,7 @@ jobs:
       - name: Generate BRD.md if missing
         run: |
           mkdir -p requirements
-          PROMPT_FILE="./github/prompts/design_gen.txt"
+          PROMPT_FILE=".github/prompts/design_gen.txt"
           if [ ! -f "$PROMPT_FILE" ]; then
             echo "::error::${PROMPT_FILE} が存在しません。"
             exit 1
